@@ -18,71 +18,79 @@
 
 #define _GNU_SOURCE
 
+#include "head_server.h"
+
+#define BUFFER_SIZE 32
+
+#define PORT 2000
+
+
 enum states {
     st_begin_work = 0,
     st_waiting_for_order,
-    st_check_condition,
-    st_coffee
+    st_check_equip,
+    st_check_water_level,
+    st_check_litter,
+    st_waiting,
+    st_make_coffee,
+    st_end_work
 };
 
 enum signals{
 	true_signal = 0,
 	false_signal,
-	singal_3,
-	signal_4
 };
 
-typedef void (*func_ptr)(enum states state, enum signals signal);
+typedef void (*func_ptr)(enum signals* signal, int sock);
 
 struct transition {
 	enum states new_state;
 	func_ptr function;
 };
 
-void begin_work (enum states state, enum signals signal);
-void end_work (enum states state, enum signals signal);
-void waiting_for_order (enum states state, enum signals signal);
-void check_condition (enum states state, enum, signals signal);
-void make_coffee (enum states state, enum signals signal);
+void begin_work (enum signals* signal, int sock);
+void end_work (enum signals* signal, int sock);
+void waiting_for_order (enum signals* signal, int sock);
+void check_equip (enum signals* signal, int sock);
+void check_water_level (enum signals* signal, int sock);
+void check_litter (enum signals* signal, int sock);
+void make_coffee (enum signals* signal, int sock);
+void waiting (enum signals* signal, int sock);
 
+struct transition sm_table [7][2] = {
+	[st_begin_work][true_signal] = {st_waiting_for_order, waiting_for_order},
+	[st_begin_work][false_signal] = {st_end_work, end_work},
 
-struct transion sm [4][4] = {
-	[st_begin_work][true_signal] = {st_waiting_for_order, begin_work},
-	[st_begin_work][false_signal] = {st_begin_work, end_work},
-	[st_begin_work][singal_3] = {st_begin_work, NULL},
-	[st_begin_work][singal_4] = {st_begin_work, NULL},
-	[st_waiting_for_order][true_signal] = {st_check_condition, check_condition},
-	[st_waiting_for_order][false_signal] = {st_begin_work, check_condition},
-	[st_waiting_for_order][singal_3] = {st_begin_work, NULL},
-	[st_waiting_for_order][singal_4] = {st_begin_work, NULL},
-	[st_check_condition][true_signal] = {st_coffee, make_coffee},
-	[st_check_condition][false_signal] = {st_coffee, make_coffee},	
-}
+	[st_waiting_for_order][true_signal] = {st_check_equip, check_equip},
+	[st_waiting_for_order][false_signal] = {st_waiting_for_order, waiting_for_order},
+	
+	[st_check_equip][true_signal] = {st_check_water_level, check_water_level},
+	[st_check_equip][false_signal] = {st_waiting, waiting},
+	
+	[st_check_water_level][true_signal] = {st_check_litter, check_litter},
+	[st_check_water_level][false_signal] = {st_waiting, waiting},	
 
-struct thr_listen_sock {
-	int listen_sock;
+	[st_check_litter][true_signal] = {st_make_coffee, make_coffee},
+	[st_check_litter][false_signal] = {st_waiting, waiting},
+
+	[st_waiting][true_signal] = {st_check_equip, check_equip},
+	[st_waiting][false_signal] = {st_end_work, NULL},
+
+	[st_make_coffee][true_signal] = {st_end_work, end_work},
+	[st_make_coffee][false_signal] = {st_end_work, NULL},
 };
 
-struct thr_data {
-	int id;
-	int sock;
-};
-
-struct thr_node {
-    int id;
-    pthread_t thread;
-    struct thr_node* next;
-};
+int electic_eq = 1;
+int water_level = 100;
+int equip = 1;
+int litter = 0;
+int work_coffee = 1;
 
 char keystoke = 0;
 
-#include "head_server.h"
-
-#define BUFFER_SIZE 32
-
 int main () {
 
-    int listen_sock, sock;
+    int listen_sock;
     struct sockaddr_in addr;
 
     if ((listen_sock = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -100,9 +108,11 @@ int main () {
     listen (listen_sock, 1);
     
    	pthread_t thr;
-
-  	struct thr_listen_sock* data;
+  	
+  	struct thr_listen_sock* data = (struct thr_listen_sock*)malloc (sizeof (struct thr_listen_sock));
+  	
   	data->listen_sock = listen_sock;
+
 
   	pthread_create (&thr, NULL, server_accept, (void*) data);
 
@@ -112,7 +122,7 @@ int main () {
     }
 
     if (pthread_join (thr, NULL)) {
-        printf ("Failed join thread : %d", i + 1);
+        printf ("Failed join thread");
         exit (EXIT_FAILURE);
     }
 
@@ -134,23 +144,149 @@ void coffee_machine(struct thr_data* data) {
 	}
 
 	if (strcmp (buff, "coffee") == 0) {
-		coffee ();
+		coffee (data->sock);
 	}
 
 	free (data);
 }
 
-void coffee () {
+void coffee (int sock) {
+	enum signals signal = true_signal;
+	enum states state = st_begin_work;
 
+	func_ptr work;
+
+	begin_work (&signal, sock);
+
+	while (work_coffee) {
+		work = sm_table[state][signal].function;
+		state = sm_table[state][signal].new_state;
+
+		if (work != NULL) {
+			work (&signal, sock);
+		}
+	}
 }
 
-void server_accept (struct thr_listen_sock* data) {
+void make_coffee (enum signals* signal, int sock) {
+	char buff[BUFFER_SIZE] = "coffee done";
+
+	water_level -= 20;
+	litter += 1;
+	
+	if (send (sock, buff, BUFFER_SIZE, 0) < 0) {
+		puts ("Failed send");
+		exit (EXIT_FAILURE);
+	}
+	*signal = true_signal;
+}
+
+void waiting (enum signals* signal, int sock) {
+	printf ("waiting \nequip : %d, water_level : %d, litter : %d\n", equip, water_level, litter);
+	if (equip != 1) {
+		equip = 1;
+	}
+	if (water_level <= 20) {
+		water_level = 100;
+	}
+	if (litter >= 6) {
+		litter = 0;
+	}
+	*signal = true_signal;
+}
+
+void check_litter (enum signals* signal, int sock) {
+	puts ("check_litter");
+
+	if (litter < 6) {
+		*signal = true_signal;
+	}
+	else {
+		*signal = false_signal;
+	}
+}
+
+void check_water_level (enum signals* signal, int sock) {
+	puts ("check_water_level");
+
+	if (water_level > 20) {
+		*signal = true_signal;
+	}
+	else {
+		*signal = false_signal;
+	}
+}
+
+void check_equip (enum signals* signal, int sock) {
+	puts ("check_equip");
+
+	if (equip == 1) {
+		*signal = true_signal;
+	}
+	else {
+		*signal = false_signal;
+	}
+}
+
+void waiting_for_order (enum signals* signal, int sock) {
+	puts ("waiting for order");
+	char buff[BUFFER_SIZE];
+	memset (buff, '\0', BUFFER_SIZE);
+
+	int cond_recv = recv (sock, buff, BUFFER_SIZE, 0);
+
+	if (cond_recv < 0) {
+		puts ("Failed recv");
+		exit (EXIT_FAILURE);
+	}
+	if (strcmp (buff, "A\n") == 0 || strcmp (buff, "B\n") == 0) {
+		memset (buff, '\0', BUFFER_SIZE);
+		strcat (buff, "order confirmed");
+		
+		if (send (sock, buff, BUFFER_SIZE, 0) < 0) {
+			puts ("Failed send");
+			exit (EXIT_FAILURE);
+		}
+		*signal = true_signal;
+	}
+	else {
+		memset (buff, '\0', BUFFER_SIZE);
+		strcat (buff, "order not confirmed");
+
+		if (send (sock, buff, BUFFER_SIZE, 0) < 0) {
+			puts ("Failed send");
+			exit (EXIT_FAILURE);
+		}
+		*signal = false_signal;
+	}
+}
+
+void end_work (enum signals* signal, int sock) {
+	puts ("end");
+	work_coffee = 0;
+}
+
+void begin_work (enum signals* signal, int sock) {
+	puts("begin");
+	work_coffee = 1;
+
+	if (electic_eq == 1) {
+		*signal = true_signal;
+	}
+	else {
+		*signal = false_signal;
+	}
+} 
+
+void server_accept (struct thr_listen_sock* data_listen) {
 	struct thr_node* thr_top = NULL;
     struct thr_data* data = NULL;
     struct thr_node* tmp;
 
+    int sock;
+
 	while (keystoke != 'p') {
-        if ((sock = accept (data->listen_sock, NULL, NULL)) < 0) {
+        if ((sock = accept (data_listen->listen_sock, NULL, NULL)) < 0) {
             puts ("Failed accept connection");
             exit (EXIT_FAILURE);
         }
@@ -165,14 +301,14 @@ void server_accept (struct thr_listen_sock* data) {
         create_thread (&thr_top, data);       
     }
 
-    while (top != NULL) {
-    	if (pthread_join (top, NULL)) {
+    while (thr_top != NULL) {
+    	if (pthread_join (thr_top->thread, NULL)) {
     		puts ("Failed join thread");
     		exit (EXIT_FAILURE);
     	}
-    	tmp = top;
-    	top = top->next;
-    	free (top);
+    	tmp = thr_top;
+    	thr_top = thr_top->next;
+    	free (tmp);
     }
 }
 
